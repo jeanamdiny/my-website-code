@@ -1,47 +1,65 @@
 name: Deploy Website to AWS
 
+# Run automatically when code is pushed to main,
+# or manually from the GitHub Actions tab.
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:   # allows manual runs from the Actions tab
+    branches:
+      - main
 
+  workflow_dispatch:
+
+# Permissions required for GitHub OIDC authentication.
 permissions:
-  id-token: write      # required for OIDC
+  id-token: write
   contents: read
 
 jobs:
   deploy:
+    name: Deploy Website
     runs-on: ubuntu-latest
-    environment: production   # triggers approval gate if configured
+    environment: production
 
     steps:
+      # Download the repository files onto the GitHub runner.
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (adjust or remove if no build step)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies & build
-        run: |
-          npm ci
-          npm run build
-
-      - name: Configure AWS credentials (OIDC)
+      # Authenticate to AWS using temporary OIDC credentials.
+      - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
-          role-duration-seconds: 900   # 15 minutes; reduce exposure window
+          role-duration-seconds: 900
 
-      - name: Sync build output to S3
+      # Confirm that the expected AWS role was assumed.
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      # Stop deployment if index.html is missing.
+      - name: Verify index.html exists
         run: |
-          aws s3 sync ./dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
+          if [ ! -f "index.html" ]; then
+            echo "ERROR: index.html was not found in the repository root."
+            exit 1
+          fi
 
+          echo "index.html was found."
+
+      # Upload website files and remove obsolete files from S3.
+      - name: Sync website to S3
+        run: |
+          aws s3 sync . "s3://${{ secrets.S3_BUCKET_NAME }}" \
+            --delete \
+            --exclude ".git/*" \
+            --exclude ".github/*" \
+            --exclude ".gitignore" \
+            --exclude "README.md"
+
+      # Clear cached website files so visitors receive the new version.
       - name: Invalidate CloudFront cache
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --distribution-id "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" \
             --paths "/*"
